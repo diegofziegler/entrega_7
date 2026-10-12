@@ -80,10 +80,10 @@ El sistema cuenta con trazabilidad completa de cada ejecución utilizando **Ariz
 
 ### 1. Iniciar el Servidor de Observabilidad (Arize Phoenix)
 
-Para levantar el panel visualizador de trazas localmente, ejecuta:
+Para levantar el panel visualizador de trazas localmente con `uv`, ejecuta:
 
 ```bash
-uv run phoenix serve
+uv run python -m phoenix.server.main serve
 ```
 
 Por defecto, la interfaz de Phoenix estará disponible en: **`http://localhost:6006`**
