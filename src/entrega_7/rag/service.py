@@ -53,7 +53,7 @@ class RAGService:
     def _init_embeddings(self):
         rag_logger.info(f"Inicializando embeddings con modelo: {settings.EMBEDDING_MODEL_NAME}")
         try:
-            from langchain_community.embeddings import HuggingFaceEmbeddings
+            from langchain_huggingface import HuggingFaceEmbeddings
             return HuggingFaceEmbeddings(model_name=settings.EMBEDDING_MODEL_NAME)
         except Exception as e:
             rag_logger.warning(f"Error al cargar HuggingFaceEmbeddings ({e}). Usando FakeEmbeddings fallback.")
