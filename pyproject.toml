@@ -11,11 +11,15 @@ dependencies = [
     "fastapi>=0.143.0",
     "httpx>=0.28.1",
     "langchain>=1.4.5",
+    "langchain-community>=0.4.2",
     "langgraph>=1.2.14",
     "phoenix>=0.9.1",
     "pinecone-client>=6.0.0",
     "pydantic>=2.14.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
     "redis>=8.1.0",
+    "sentence-transformers>=6.1.0",
     "uvicorn>=0.54.0",
 ]
 
