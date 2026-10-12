@@ -12,7 +12,7 @@ El sistema implementa un flujo unificado estructurado en capas:
 2. **Capa de Orquestación y Razonamiento (LangGraph):** Grafo de agentes con un *Supervisor* autónomo capaz de delegar tareas entre el *Agente Investigador RAG* y el *Agente Analista/Sintetizador* multilingüe.
 3. **Capa de Memoria y Persistencia:** Uso de *Checkpointers* de LangGraph respaldados por Redis (o almacenamiento en memoria resiliente) para garantizar que el estado de las conversaciones persista por `thread_id`.
 4. **Capa de Conocimiento (RAG Avanzado):** Recuperación híbrida y gestión de metadatos utilizando **Pinecone** como base de datos vectorial (con fallback local/en memoria resiliente para desarrollo y pruebas).
-5. **Capa de Observabilidad:** Trazado de ejecución de punta a punta con *Arize Phoenix* (OpenInference / OTLP) y generación de logs dedicados (`log/agentes.log` y `log/rag.log`).
+5. **Capa de Observabilidad:** Trazado de ejecución de punta a punta con **Arize Phoenix** (OpenInference / OTLP) y generación de logs dedicados (`log/agentes.log` y `log/rag.log`).
 
 ```mermaid
 graph TD  
@@ -58,7 +58,7 @@ Crea un archivo `.env` basado en el archivo de ejemplo:
 cp .env.example .env
 ```
 
-*(Variables requeridas / opcionales: `GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY`, `PINECONE_API_KEY`, `PINECONE_INDEX_NAME`, `REDIS_URL`, etc.)*
+*(Variables requeridas / opcionales: `GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY`, `PINECONE_API_KEY`, `PINECONE_INDEX_NAME`, `REDIS_URL`, `PHOENIX_COLLECTOR_ENDPOINT`, etc.)*
 
 ---
 
@@ -71,6 +71,43 @@ Para iniciar el servidor de desarrollo de FastAPI utilizando el entorno virtual 
 ```bash
 uv run uvicorn src.entrega_7.main:app --reload
 ```
+
+---
+
+## 📊 Observabilidad e Inicialización de Trazas (Arize Phoenix)
+
+El sistema cuenta con trazabilidad completa de cada ejecución utilizando **Arize Phoenix** y OpenInference.
+
+### 1. Iniciar el Servidor de Observabilidad (Arize Phoenix)
+
+Para levantar el panel visualizador de trazas localmente, ejecuta:
+
+```bash
+uv run phoenix serve
+```
+
+Por defecto, la interfaz de Phoenix estará disponible en: **`http://localhost:6006`**
+
+### 2. Configuración en `.env`
+
+Asegúrate de tener configuradas las siguientes variables en tu archivo `.env`:
+
+```env
+PHOENIX_COLLECTOR_ENDPOINT=http://localhost:6006
+PHOENIX_PROJECT_NAME=orquestador-multi-agente
+```
+
+### 3. Visualización y Evidencias
+
+- Toda llamada enviada a la API (`POST /api/v1/chat`) instrumenta automáticamente los *spans* de LangGraph, consultas RAG e invocaciones a los modelos LLM.
+- Al ingresar a `http://localhost:6006`, podrás inspeccionar en tiempo real el árbol de llamadas, latencias, token count y costos asociados a cada interacción.
+- Las evidencias e instrucciones adicionales se almacenan en el directorio [`./trazas`](./trazas).
+
+### 4. Archivos de Log Locales
+
+Además de la telemetría OTLP, el sistema registra actividades separadas en:
+- **`./log/agentes.log`**: Transiciones del supervisor, decisiones y respuesta del analista.
+- **`./log/rag.log`**: Carga de embeddings, ingesta de `.md` y búsquedas de similitud.
 
 ---
 
@@ -88,19 +125,6 @@ uv run uvicorn src.entrega_7.main:app --reload
     ```
 - `GET /api/v1/history/{thread_id}`: Recupera el historial de mensajes asociado a una sesión activa.
 - `POST /api/v1/rag/ingest`: Ejecuta o fuerza la ingesta de documentos Markdown ubicados en `./data`.
-
----
-
-## 📊 Observabilidad y Trazas
-
-El sistema cuenta con observabilidad e historial de trazabilidad integrados:
-
-1. **Logs de Ejecución:**
-   - `./log/agentes.log`: Decisiones del supervisor y síntesis del analista.
-   - `./log/rag.log`: Ingesta y búsquedas de similitud vectorial.
-2. **Telemetría OTLP (Arize Phoenix / OpenInference):**
-   - Configura `PHOENIX_COLLECTOR_ENDPOINT` en `.env`.
-   - Evidencias guardadas en el directorio [`./trazas`](./trazas).
 
 ---
 
