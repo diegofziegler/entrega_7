@@ -22,28 +22,29 @@ Para que funcione de forma limpia y robusta, te sugiero integrarlo de la siguien
 1. **Ampliar el Estado Compartido (`State`):** Añade el parámetro de idioma al esquema de control para que todos los nodos lo conozcan:
 
 ```python
-class MultiAgentState(TypedDict):          
-    messages: Annotated[list[BaseMessage], add_messages]          
-    next: str          
-    idioma_destino: str # <-- Nuevo parámetro global  
+class MultiAgentState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+    next: str
+    idioma_destino: str # <-- Nuevo parámetro global
 ```
 
 1. **Inyección en el Prompt del Agente de Análisis/Síntesis:** El agente encargado de redactar la respuesta final debe recibir este parámetro en su prompt del sistema para que traduzca, adapte y responda rigurosamente en ese idioma:
 
 ```python
-def analyst_node(state: MultiAgentState):          
-idioma = state.get("idioma_destino", "Español")          
-system_prompt = f"Sos un analista experto. Tu objetivo es procesar la información obtenida y redactar la respuesta final exclusivamente en idioma: {idioma}."          
-# ... lógica de invocación al agente ...  
+def analyst_node(state: MultiAgentState):
+idioma = state.get("idioma_destino", "Español")
+system_prompt = f"Sos un analista experto. Tu objetivo es procesar la información obtenida y redactar la respuesta final exclusivamente en idioma: {idioma}."
+# ... lógica de invocación al agente ...
+
 ```
 
 1. **Configuración inicial en la ejecución (`ainvoke` / `astream`):** Cuando un usuario inicie la consulta, pasas el idioma deseado como parte del estado inicial:
 
 ```python
-initial_state = {          
-    "messages": [HumanMessage(content="¿De qué tratan los documentos sobre el proyecto?")],          
-    "idioma_destino": "Francés" # Aquí configuras el parámetro dinámicamente          
-}  
+initial_state = {
+    "messages": [HumanMessage(content="¿De qué tratan los documentos sobre el proyecto?")],
+    "idioma_destino": "Francés" # Aquí configuras el parámetro dinámicamente
+}
 ```
 
 ---
@@ -54,7 +55,8 @@ initial_state = {
 
 ---
 
-## 4. RAG 
+## 4. RAG
+
 
 Las instrucciones respecto de esta funcionalidad las he dejado en el archivo [rag_vectordb.md](./rag_vectordb.md)
 
@@ -69,5 +71,3 @@ Debes generar los archivos de log en el directorio [log](./log).
 Un archivo de log (llamado *agentes*) debe estar destinado al *Orquestador Multi Agente*. Y otro archivo distinto (llamado *rag*) debe estar destinado al *Rag*.
 
 ---
-
- 
