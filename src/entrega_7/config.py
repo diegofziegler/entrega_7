@@ -1,5 +1,5 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
 
@@ -18,17 +18,21 @@ class Settings(BaseSettings):
     # Vector DB & Pinecone
     PINECONE_API_KEY: Optional[str] = None
     PINECONE_INDEX_NAME: str = "entrega-7-index"
-    EMBEDDING_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"
+    PINECONE_NAMESPACE: str = ""
+    EMBEDDING_MODEL_NAME: str = "text-embedding-3-small"
+    ANALYST_MAX_OUTPUT_CHARS: int = Field(default=30_000, ge=500, le=200_000)
     VECTORSTORE_DIR: str = "./vectorstore"
     DATA_DIR: str = "./data"
     LOG_DIR: str = "./log"
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379"
+    REDIS_REQUIRED: bool = True
 
     # Telemetry
     PHOENIX_COLLECTOR_ENDPOINT: str = "http://localhost:6006"
     PHOENIX_PROJECT_NAME: str = "orquestador-multi-agente"
+    PHOENIX_ENABLED: bool = True
 
     # Language
     DEFAULT_LANGUAGE: str = "Español"

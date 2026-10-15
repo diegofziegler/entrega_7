@@ -1,0 +1,37 @@
+services:
+  redis:
+    image: redis/redis-stack-server:7.4.0-v3
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports:
+      - "6006:6006"
+
+  api:
+    build: .
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      phoenix:
+        condition: service_started
+    volumes:
+      - ./data:/app/data:ro
+      - ./log:/app/log
+
+volumes:
+  redis_data:

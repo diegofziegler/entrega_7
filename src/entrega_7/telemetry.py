@@ -1,26 +1,43 @@
-from src.entrega_7.config import settings
-from src.entrega_7.logging_config import agentes_logger
+from entrega_7.config import settings
+from entrega_7.logging_config import agentes_logger
+
+_configured = False
+_provider = None
 
 
-def setup_telemetry():
-    if settings.PHOENIX_COLLECTOR_ENDPOINT:
-        try:
-            from openinference.instrumentation.langchain import LangChainInstrumentor
-            from opentelemetry import trace as trace_api
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-            from opentelemetry.sdk.trace import TracerProvider
-            from opentelemetry.sdk.trace.export import BatchSpanProcessor
+def setup_telemetry() -> bool:
+    """Configure LangChain/OpenInference export before the first graph invocation."""
+    global _configured, _provider
+    if _configured:
+        return True
+    if not settings.PHOENIX_ENABLED or not settings.PHOENIX_COLLECTOR_ENDPOINT:
+        agentes_logger.info("Telemetría Phoenix deshabilitada por configuración.")
+        return False
+    try:
+        from openinference.instrumentation.langchain import LangChainInstrumentor
+        from opentelemetry import trace
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-            tracer_provider = TracerProvider()
-            endpoint = f"{settings.PHOENIX_COLLECTOR_ENDPOINT.rstrip('/')}/v1/traces"
-            span_processor = BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint))
-            tracer_provider.add_span_processor(span_processor)
-            trace_api.set_tracer_provider(tracer_provider)
+        endpoint = settings.PHOENIX_COLLECTOR_ENDPOINT.rstrip("/")
+        if not endpoint.endswith("/v1/traces"):
+            endpoint += "/v1/traces"
+        provider = TracerProvider(resource=Resource.create({"service.name": "entrega-7", "openinference.project.name": settings.PHOENIX_PROJECT_NAME}))
+        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
+        trace.set_tracer_provider(provider)
+        LangChainInstrumentor().instrument(tracer_provider=provider)
+        _provider = provider
+        _configured = True
+        agentes_logger.info("Trazas OpenInference enviándose a Phoenix: %s", endpoint)
+        return True
+    except Exception:
+        agentes_logger.exception("No se pudo configurar la exportación de trazas a Phoenix.")
+        return False
 
-            LangChainInstrumentor().instrument()
-            agentes_logger.info(f"Arize Phoenix OpenInference Telemetry instrumentado hacia {endpoint}")
-        except Exception as e:
-            agentes_logger.warning(f"No se pudo configurar OpenInference / Phoenix Telemetry ({e}).")
 
-
-setup_telemetry()
+def shutdown_telemetry() -> None:
+    if _provider is not None:
+        _provider.force_flush(timeout_millis=5_000)
+        _provider.shutdown()

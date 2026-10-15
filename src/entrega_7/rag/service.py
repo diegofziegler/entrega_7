@@ -1,120 +1,138 @@
-import os
-import glob
 import asyncio
-from typing import List
+import hashlib
+import glob
+import math
+import os
+import re
+from pathlib import Path
+from collections import Counter
+
 from langchain_core.documents import Document
-from langchain_community.document_loaders import TextLoader
+from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.embeddings import Embeddings
-from src.entrega_7.config import settings
-from src.entrega_7.logging_config import rag_logger
+
+from entrega_7.config import settings
+from entrega_7.logging_config import rag_logger
 
 
-class SimpleLocalVectorStore:
-    """Fallback in-memory vector store with cosine similarity calculation when Pinecone is unavailable."""
-    def __init__(self, embeddings: Embeddings):
-        self.embeddings = embeddings
-        self.documents: List[Document] = []
-        self.vectors: List[List[float]] = []
-
-    async def aadd_documents(self, docs: List[Document]):
-        texts = [doc.page_content for doc in docs]
-        embeds = await asyncio.to_thread(self.embeddings.embed_documents, texts)
-        self.documents.extend(docs)
-        self.vectors.extend(embeds)
-        rag_logger.info(f"LocalVectorStore: Agregados {len(docs)} documentos al almacenamiento local/en memoria.")
-
-    async def asimilarity_search(self, query: str, k: int = 4) -> List[Document]:
-        if not self.documents:
-            return []
-        query_embed = await asyncio.to_thread(self.embeddings.embed_query, query)
-
-        # Compute cosine similarity
-        scores = []
-        for i, vec in enumerate(self.vectors):
-            dot = sum(q * v for q, v in zip(query_embed, vec))
-            norm_q = sum(q * q for q in query_embed) ** 0.5
-            norm_v = sum(v * v for v in vec) ** 0.5
-            sim = dot / (norm_q * norm_v) if norm_q and norm_v else 0.0
-            scores.append((sim, self.documents[i]))
-
-        scores.sort(key=lambda x: x[0], reverse=True)
-        results = [doc for _, doc in scores[:k]]
-        rag_logger.info(f"LocalVectorStore: Búsqueda de similitud para '{query}' retornó {len(results)} resultados.")
-        return results
+def _tokens(text: str) -> list[str]:
+    return re.findall(r"\w+", text.casefold())
 
 
 class RAGService:
+    """Pinecone-backed hybrid retriever: dense Pinecone results + lexical RRF."""
+
     def __init__(self):
-        self.embeddings = self._init_embeddings()
+        self.embeddings = None
         self.vectorstore = None
-        self._init_vectorstore()
+        self._documents: list[Document] = []
+        self._initialize_lock = asyncio.Lock()
 
-    def _init_embeddings(self):
-        rag_logger.info(f"Inicializando embeddings con modelo: {settings.EMBEDDING_MODEL_NAME}")
-        try:
-            from langchain_huggingface import HuggingFaceEmbeddings
-            return HuggingFaceEmbeddings(model_name=settings.EMBEDDING_MODEL_NAME)
-        except Exception as e:
-            rag_logger.warning(f"Error al cargar HuggingFaceEmbeddings ({e}). Usando FakeEmbeddings fallback.")
-            from langchain_community.embeddings import FakeEmbeddings
-            return FakeEmbeddings(size=384)
-
-    def _init_vectorstore(self):
-        if settings.PINECONE_API_KEY and settings.PINECONE_INDEX_NAME:
-            try:
-                from pinecone import Pinecone
-                from langchain_pinecone import PineconeVectorStore
-                pc = Pinecone(api_key=settings.PINECONE_API_KEY)
-                self.vectorstore = PineconeVectorStore.from_existing_index(
-                    index_name=settings.PINECONE_INDEX_NAME,
-                    embedding=self.embeddings
-                )
-                rag_logger.info("VectorStore Pinecone inicializado exitosamente.")
+    async def initialize(self) -> None:
+        if self.vectorstore is not None:
+            return
+        async with self._initialize_lock:
+            if self.vectorstore is not None:
                 return
-            except Exception as e:
-                rag_logger.warning(f"No se pudo conectar a Pinecone: {e}. Usando fallback local/en memoria.")
+            if not settings.PINECONE_API_KEY or not settings.PINECONE_INDEX_NAME:
+                raise RuntimeError("PINECONE_API_KEY y PINECONE_INDEX_NAME son obligatorios para RAG.")
+            await asyncio.to_thread(self._initialize_sync)
 
-        rag_logger.info("Usando SimpleLocalVectorStore como almacenamiento vectorial fallback.")
-        self.vectorstore = SimpleLocalVectorStore(self.embeddings)
+    def _initialize_sync(self) -> None:
+        from langchain_openai import OpenAIEmbeddings
+        from langchain_pinecone import PineconeVectorStore
 
-    async def ingest_directory(self, data_dir: str = None) -> int:
+        if not settings.OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY es obligatoria para generar embeddings compatibles con Pinecone.")
+        self.embeddings = OpenAIEmbeddings(
+            model=settings.EMBEDDING_MODEL_NAME,
+            dimensions=1536,
+            api_key=settings.OPENAI_API_KEY,
+        )
+        self.vectorstore = PineconeVectorStore(
+            index_name=settings.PINECONE_INDEX_NAME,
+            pinecone_api_key=settings.PINECONE_API_KEY,
+            embedding=self.embeddings,
+            namespace=settings.PINECONE_NAMESPACE or None,
+            text_key="text",
+        )
+        rag_logger.info("Conexión a Pinecone preparada para búsqueda híbrida.")
+
+    async def ingest_directory(self, data_dir: str | None = None) -> int:
+        await self.initialize()
         target_dir = data_dir or settings.DATA_DIR
-        rag_logger.info(f"Iniciando ingesta de documentos desde: {target_dir}")
-        md_files = sorted(list(set(glob.glob(os.path.join(target_dir, "**/*.md"), recursive=True))))
-
+        md_files = sorted(glob.glob(os.path.join(target_dir, "**", "*.md"), recursive=True))
         if not md_files:
-            rag_logger.warning(f"No se encontraron archivos .md en {target_dir}")
+            rag_logger.warning("No se encontraron documentos Markdown en %s", target_dir)
+            self._documents = []
             return 0
 
-        docs = []
+        docs: list[Document] = []
         for file_path in md_files:
-            try:
-                loader = TextLoader(file_path, encoding="utf-8")
-                loaded = loader.load()
-                for doc in loaded:
-                    doc.metadata["source"] = os.path.basename(file_path)
-                docs.extend(loaded)
-            except Exception as e:
-                rag_logger.error(f"Error cargando archivo {file_path}: {e}")
+            content = await asyncio.to_thread(Path(file_path).read_text, encoding="utf-8")
+            docs.append(Document(
+                page_content=content,
+                metadata={"source": os.path.basename(file_path), "path": os.path.relpath(file_path, target_dir)},
+            ))
 
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=100)
-        split_docs = text_splitter.split_documents(docs)
+        splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=100)
+        chunks = splitter.split_documents(docs)
+        ids = []
+        for index, doc in enumerate(chunks):
+            doc.metadata["chunk_id"] = index
+            ids.append(hashlib.sha256(f"{doc.metadata['path']}:{doc.page_content}".encode("utf-8")).hexdigest())
+        await self.vectorstore.aadd_documents(chunks, ids=ids)
+        self._documents = chunks
+        rag_logger.info("Ingestados %d chunks en Pinecone.", len(chunks))
+        return len(chunks)
 
-        if hasattr(self.vectorstore, "aadd_documents"):
-            await self.vectorstore.aadd_documents(split_docs)
-        else:
-            await asyncio.to_thread(self.vectorstore.add_documents, split_docs)
+    async def search(self, query: str, k: int = 4) -> list[Document]:
+        if k < 1:
+            return []
+        await self.initialize()
+        from opentelemetry import trace
 
-        rag_logger.info(f"Ingesta completada: {len(split_docs)} chunks procesados e indexados.")
-        return len(split_docs)
+        with trace.get_tracer("entrega_7.rag").start_as_current_span("rag.hybrid_search") as span:
+            span.set_attribute("retrieval.strategy", "pinecone_dense+bm25_lexical_rrf")
+            span.set_attribute("retrieval.top_k", k)
+            dense_results = await self.vectorstore.asimilarity_search(query, k=max(k * 3, 10))
+            lexical_results = await asyncio.to_thread(self._lexical_search, query, max(k * 3, 10))
 
-    async def search(self, query: str, k: int = 4) -> List[Document]:
-        rag_logger.info(f"Ejecutando búsqueda RAG para consulta: '{query}'")
-        if hasattr(self.vectorstore, "asimilarity_search"):
-            return await self.vectorstore.asimilarity_search(query, k=k)
-        else:
-            return await asyncio.to_thread(self.vectorstore.similarity_search, query, k=k)
+            # Reciprocal Rank Fusion combines Pinecone's dense ranking and BM25-style lexical ranking.
+            scores: dict[tuple[str, str], float] = {}
+            documents: dict[tuple[str, str], Document] = {}
+            for result_list in (dense_results, lexical_results):
+                for rank, doc in enumerate(result_list, start=1):
+                    key = (str(doc.metadata.get("source", "")), doc.page_content)
+                    documents[key] = doc
+                    scores[key] = scores.get(key, 0.0) + 1 / (60 + rank)
+            results = [documents[key] for key in sorted(scores, key=scores.get, reverse=True)[:k]]
+            span.set_attribute("retrieval.pinecone.result_count", len(dense_results))
+            span.set_attribute("retrieval.lexical.result_count", len(lexical_results))
+            span.set_attribute("retrieval.fused.result_count", len(results))
+            rag_logger.info("Búsqueda híbrida completada: dense=%d lexical=%d fused=%d", len(dense_results), len(lexical_results), len(results))
+            return results
+
+    def _lexical_search(self, query: str, k: int) -> list[Document]:
+        query_terms = _tokens(query)
+        if not query_terms or not self._documents:
+            return []
+        documents = [(doc, _tokens(doc.page_content)) for doc in self._documents]
+        avg_length = sum(len(words) for _, words in documents) / max(len(documents), 1)
+        doc_frequency = Counter(term for term in set(query_terms) for _, words in documents if term in words)
+        ranked = []
+        for doc, words in documents:
+            frequencies = Counter(words)
+            score = 0.0
+            for term in query_terms:
+                tf = frequencies[term]
+                if tf:
+                    idf = math.log(1 + (len(documents) - doc_frequency[term] + 0.5) / (doc_frequency[term] + 0.5))
+                    score += idf * (tf * 2.2) / (tf + 1.2 * (0.25 + 0.75 * len(words) / max(avg_length, 1)))
+            if score:
+                ranked.append((score, doc))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [doc for _, doc in ranked[:k]]
 
 
 rag_service = RAGService()

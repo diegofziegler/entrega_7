@@ -1,54 +1,58 @@
-import json
-from typing import Literal
-from pydantic import BaseModel, Field
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-from src.entrega_7.graph.state import MultiAgentState
-from src.entrega_7.agents.llm_factory import get_llm
-from src.entrega_7.rag.service import rag_service
-from src.entrega_7.config import settings
-from src.entrega_7.logging_config import agentes_logger
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+
+from entrega_7.agents.chains import (
+    create_analyst_chain,
+    create_rag_search_chain,
+    create_supervisor_chain,
+)
+from entrega_7.agents.contracts import AnalystOutput, RAGSearchInput
+from entrega_7.agents.llm_factory import get_llm
+from entrega_7.config import settings
+from entrega_7.graph.state import MultiAgentState
+from entrega_7.logging_config import agentes_logger
+from entrega_7.rag.service import rag_service
 
 
-class RouterSchema(BaseModel):
-    next_step: Literal["INVESTIGADOR", "ANALISTA", "FIN"] = Field(
-        description="Siguiente agente a ejecutar o FIN si la respuesta está completa."
-    )
+rag_search_chain = create_rag_search_chain(rag_service.search)
+
+
+def _message_text(message: BaseMessage) -> str:
+    content = message.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        blocks = []
+        for block in content:
+            if isinstance(block, str):
+                blocks.append(block)
+            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                blocks.append(block["text"])
+            else:
+                text = getattr(block, "text", None)
+                if isinstance(text, str):
+                    blocks.append(text)
+        return "\n".join(blocks)
+    return str(content) if content is not None else ""
 
 
 async def supervisor_node(state: MultiAgentState) -> dict:
     agentes_logger.info("--- NODO SUPERVISOR ---")
-    messages = state.get("messages", [])
-    last_msg = messages[-1].content if messages else ""
-
-    system_prompt = (
-        "Sos el Agente Supervisor. Tu tarea es analizar la conversación y decidir el siguiente paso.\n"
-        "Opciones disponibles:\n"
-        "- 'INVESTIGADOR': Si se necesita buscar información en la base de datos (RAG).\n"
-        "- 'ANALISTA': Si ya se obtuvo la información y se debe redactar la respuesta final en el idioma destino.\n"
-        "- 'FIN': Si la pregunta ya ha sido respondida satisfactoriamente.\n"
-        "Responde ÚNICAMENTE en formato JSON como: {\"next_step\": \"INVESTIGADOR\" | \"ANALISTA\" | \"FIN\"}"
-    )
-
-    llm = get_llm()
+    messages = list(state.get("messages", []))
     try:
-        if hasattr(llm, "with_structured_output"):
-            structured_llm = llm.with_structured_output(RouterSchema)
-            res = await structured_llm.ainvoke([SystemMessage(content=system_prompt)] + list(messages))
-            next_step = res.next_step
-        else:
-            response = await llm.ainvoke([SystemMessage(content=system_prompt), HumanMessage(content=f"Último mensaje: {last_msg}")])
-            content = response.content.upper()
-            if "INVESTIGADOR" in content:
-                next_step = "INVESTIGADOR"
-            elif "ANALISTA" in content:
-                next_step = "ANALISTA"
-            else:
-                next_step = "FIN"
-    except Exception as e:
-        agentes_logger.warning(f"Error en decisión de supervisor ({e}). Usando lógica de fallback.")
-        has_investigated = any("Módulo RAG" in getattr(m, "content", "") for m in messages)
-        has_analyzed = any("Respuesta final" in getattr(m, "content", "") for m in messages)
-
+        chain = create_supervisor_chain(get_llm())
+        decision = await chain.ainvoke({"messages": messages})
+        next_step = decision.next_step
+    except Exception as exc:
+        agentes_logger.warning(
+            "Error en cadena LCEL del supervisor (%s). Usando lógica de fallback.", exc
+        )
+        contents = [_message_text(message) for message in messages]
+        has_investigated = any("Módulo RAG" in content for content in contents)
+        has_analyzed = any(
+            getattr(message, "name", None) == "Analista_Sintetizador"
+            or "Respuesta final" in content
+            for message, content in zip(messages, contents)
+        )
         if not has_investigated:
             next_step = "INVESTIGADOR"
         elif not has_analyzed:
@@ -56,33 +60,33 @@ async def supervisor_node(state: MultiAgentState) -> dict:
         else:
             next_step = "FIN"
 
-    agentes_logger.info(f"Supervisor decidió siguiente paso: {next_step}")
+    agentes_logger.info("Supervisor decidió siguiente paso: %s", next_step)
     return {"next": next_step}
 
 
 async def investigador_node(state: MultiAgentState) -> dict:
     agentes_logger.info("--- NODO INVESTIGADOR (RAG) ---")
     messages = state.get("messages", [])
-    user_query = ""
-    for msg in reversed(messages):
-        if isinstance(msg, HumanMessage):
-            user_query = msg.content
-            break
+    user_query = next(
+        (_message_text(message) for message in reversed(messages) if isinstance(message, HumanMessage)),
+        "",
+    )
     if not user_query and messages:
-        user_query = messages[0].content
+        user_query = _message_text(messages[0])
 
-    agentes_logger.info(f"Investigador buscando información para: '{user_query}'")
-    docs = await rag_service.search(user_query, k=4)
+    agentes_logger.info("Investigador buscando información para: '%s'", user_query)
+    search_input = RAGSearchInput(query=user_query, k=4)
+    search_output = await rag_search_chain.ainvoke(search_input)
 
-    if docs:
-        retrieved_text = "\n\n".join([f"Source [{doc.metadata.get('source', 'doc')}]: {doc.page_content}" for doc in docs])
+    if search_output.results:
+        retrieved_text = "\n\n".join(search_output.results)
         content = f"[Módulo RAG - Información Encontrada]:\n{retrieved_text}"
     else:
         content = "[Módulo RAG]: No se encontró información relevante en los documentos."
 
     return {
         "messages": [AIMessage(content=content, name="Investigador_RAG")],
-        "next": "SUPERVISOR"
+        "next": "SUPERVISOR",
     }
 
 
@@ -90,32 +94,40 @@ async def analista_node(state: MultiAgentState) -> dict:
     agentes_logger.info("--- NODO ANALISTA / SINTETIZADOR ---")
     messages = state.get("messages", [])
     idioma = state.get("idioma_destino") or settings.DEFAULT_LANGUAGE
-
-    system_prompt = (
-        f"Sos un analista experto. Tu objetivo es procesar la información obtenida por el Investigador "
-        f"y redactar una respuesta clara, completa y estructurada exclusivamente en el idioma: {idioma}."
+    question = next(
+        (_message_text(message) for message in reversed(messages) if isinstance(message, HumanMessage)),
+        "",
+    )
+    context = next(
+        (
+            _message_text(message)
+            for message in reversed(messages)
+            if "Módulo RAG" in _message_text(message)
+        ),
+        "No se encontró información relevante en los documentos.",
     )
 
-    llm = get_llm()
     try:
-        response = await llm.ainvoke([SystemMessage(content=system_prompt)] + list(messages))
-        reply_content = response.content
-        if "Respuesta final" not in reply_content:
-            reply_content = f"Respuesta final ({idioma}):\n" + reply_content
-    except Exception as e:
-        agentes_logger.warning(f"Error en analista_node con LLM ({e}). Generando síntesis sintética.")
-        rag_info = ""
-        for m in messages:
-            if "Módulo RAG" in getattr(m, "content", ""):
-                rag_info = m.content
-
-        reply_content = (
-            f"Respuesta final ({idioma}):\n"
-            f"Basado en la información recopilada:\n{rag_info[:500]}..."
+        chain = create_analyst_chain(get_llm())
+        answer = await chain.ainvoke(
+            {"question": question, "context": context, "language": idioma}
         )
+    except Exception as exc:
+        agentes_logger.warning(
+            "Error en cadena LCEL del analista (%s). Generando síntesis de respaldo.", exc
+        )
+        fallback = context[:500].rstrip()
+        if len(context) > len(fallback):
+            fallback = fallback[: max(1, settings.ANALYST_MAX_OUTPUT_CHARS - 3)].rstrip() + "..."
+        if not fallback:
+            fallback = "No se pudo generar una respuesta."
+        max_chars = settings.ANALYST_MAX_OUTPUT_CHARS
+        if len(fallback) > max_chars:
+            fallback = fallback[: max_chars - 3].rstrip() + "..."
+        answer = AnalystOutput(answer=fallback)
 
-    agentes_logger.info(f"Analista generó respuesta en idioma '{idioma}'")
+    agentes_logger.info("Analista generó respuesta en idioma '%s'", idioma)
     return {
-        "messages": [AIMessage(content=reply_content, name="Analista_Sintetizador")],
-        "next": "FIN"
+        "messages": [AIMessage(content=answer.answer, name="Analista_Sintetizador")],
+        "next": "FIN",
     }

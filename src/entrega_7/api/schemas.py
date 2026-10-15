@@ -1,28 +1,43 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class ChatRequest(BaseModel):
-    message: str = Field(..., json_schema_extra={"example": "¿Quién fue Kanbun Uechi?"})
-    thread_id: str = Field(..., json_schema_extra={"example": "session-123"})
-    idioma_destino: Optional[str] = Field("Español", json_schema_extra={"example": "Francés"})
+class StrictSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
-class ChatResponse(BaseModel):
+class ChatRequest(StrictSchema):
+    message: str = Field(min_length=1, max_length=20_000, examples=["¿Quién fue Kanbun Uechi?"])
+    thread_id: str = Field(min_length=1, max_length=200, pattern=r"^[\w.:-]+$")
+    idioma_destino: str | None = Field(default=None, min_length=2, max_length=64)
+
+
+class HistoryMessage(StrictSchema):
+    sender: str
+    content: str
+
+
+class ChatResponse(StrictSchema):
     thread_id: str
     reply: str
     idioma_destino: str
-    history: List[Dict[str, Any]]
+    history: list[HistoryMessage]
 
 
-class IngestResponse(BaseModel):
-    status: str
-    chunks_ingested: int
+class HistoryResponse(StrictSchema):
+    thread_id: str
+    messages: list[HistoryMessage]
+
+
+class IngestResponse(StrictSchema):
+    status: Literal["success"]
+    chunks_ingested: int = Field(ge=0)
     data_dir: str
 
 
-class HealthResponse(BaseModel):
-    status: str
+class HealthResponse(StrictSchema):
+    status: Literal["ok", "degraded"]
     llm_provider: str
-    rag_status: str
-    checkpointer: str
+    rag_status: Literal["active", "unavailable"]
+    checkpointer: Literal["redis"]

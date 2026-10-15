@@ -1,7 +1,7 @@
 [project]
 name = "entrega-7"
 version = "0.1.0"
-description = "Add your description here"
+description = "API multiagente con RAG híbrido Pinecone, Redis Checkpointer y trazas Phoenix"
 readme = "README.md"
 authors = [
     { name = "diegofziegler", email = "diego.f.ziegler@gmail.com" }
@@ -12,13 +12,18 @@ dependencies = [
     "fastapi>=0.143.0",
     "httpx>=0.28.1",
     "langchain>=1.4.5",
-    "langchain-community>=0.4.2",
     "langchain-huggingface>=1.2.3",
+    "langchain-text-splitters>=1.0.0",
+    "langchain-pinecone>=0.2.13",
+    "langchain-google-genai>=2.1.0",
+    "langchain-groq>=0.3.8",
+    "langchain-openai>=0.3.30",
     "langgraph>=1.2.14",
+    "langgraph-checkpoint-redis>=0.1.3",
     "openinference-instrumentation-langchain>=0.1.79",
     "opentelemetry-exporter-otlp>=1.45.1",
-    "pinecone>=10.0.0",
     "pydantic>=2.14.1",
+    "pydantic-settings>=2.10.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "redis>=8.1.0",
@@ -27,8 +32,12 @@ dependencies = [
 ]
 
 [project.scripts]
-entrega-7 = "entrega_7:main"
+entrega-7 = "entrega_7.main:main"
 
 [build-system]
 requires = ["uv_build>=0.12.9,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

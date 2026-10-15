@@ -1,137 +1,179 @@
-# The Intelligence System (Entrega 7)
+# Entrega 7 — sistema multiagente con RAG
 
-Sistema de inteligencia artificial de grado de producción, diseñado para razonar, recordar, escalar y ofrecer trazabilidad completa. Este proyecto consolida e integra pre-entregas previas (RAG, Agentes con supervisor en LangGraph, API con FastAPI y persistencia con Redis y Pinecone) en una única arquitectura limpia, asíncrona y robusta.
+API asíncrona con FastAPI y LangGraph. Redis conserva los checkpoints por `thread_id`, Pinecone almacena los fragmentos y participa en la recuperación híbrida densa + léxica, y OpenInference exporta spans a Arize Phoenix.
 
----
-
-## 🏗️ Arquitectura del Sistema
-
-El sistema implementa un flujo unificado estructurado en capas:
-
-1. **Capa de API (FastAPI):** Interfaz profesional y documentada con endpoints asíncronos para chat multi-agente (`/api/v1/chat`), consulta de historial (`/api/v1/history/{thread_id}`), ingesta de conocimiento (`/api/v1/rag/ingest`) y verificación de estado (`/health`).
-2. **Capa de Orquestación y Razonamiento (LangGraph):** Grafo de agentes con un *Supervisor* autónomo capaz de delegar tareas entre el *Agente Investigador RAG* y el *Agente Analista/Sintetizador* multilingüe.
-3. **Capa de Memoria y Persistencia:** Uso de *Checkpointers* de LangGraph respaldados por Redis (o almacenamiento en memoria resiliente) para garantizar que el estado de las conversaciones persista por `thread_id`.
-4. **Capa de Conocimiento (RAG Avanzado):** Recuperación híbrida y gestión de metadatos utilizando **Pinecone** como base de datos vectorial (con fallback local/en memoria resiliente para desarrollo y pruebas).
-5. **Capa de Observabilidad:** Trazado de ejecución de punta a punta con **Arize Phoenix** (OpenInference / OTLP) y generación de logs dedicados (`log/agentes.log` y `log/rag.log`).
+## Arquitectura
 
 ```mermaid
-graph TD  
-    User([Usuario / Cliente API]) -->|Async Request| FastAPI[FastAPI Backend]  
-    FastAPI --> Supervisor[LangGraph Supervisor]  
-    Supervisor -->|Delega| Agent1[Agente Investigador RAG]  
-    Supervisor -->|Delega| Agent2[Agente Analista / Sintetizador]
-    Agent1 --> Pinecone[(Pinecone Vector DB / Local Fallback)]
-    FastAPI --> Redis[(Redis Checkpointer / Estado)]  
-    Supervisor --> Phoenix[Arize Phoenix / Trazas]
+flowchart TD
+    U[Cliente] --> API[FastAPI + Pydantic]
+    API -->|thread_id| G[LangGraph]
+    G --> S[Supervisor]
+    S -->|INVESTIGADOR| R[Investigador]
+    R --> H[Recuperación híbrida]
+    H --> P[(Pinecone: similitud densa)]
+    H --> L[Ranking léxico BM25 sobre Markdown]
+    R --> S
+    S -->|ANALISTA| A[Analista: idioma destino]
+    A --> API
+    G <--> RC[(Redis Checkpointer)]
+    API -. spans / tokens .-> PH[Arize Phoenix]
 ```
 
----
+El índice semántico vive en Pinecone. La señal léxica se calcula sobre los fragmentos Markdown cargados durante la ingesta; ambas listas se combinan con Reciprocal Rank Fusion. Cada chunk usa un ID determinista para que las ingestas repetidas actualicen el mismo vector.
 
-## 🛠️ Requisitos del Sistema
+Las decisiones del supervisor y la síntesis del analista se componen como cadenas LCEL (`prompt | modelo | parser/validación`). El buscador híbrido async se expone como `Runnable` con contratos Pydantic para que LangGraph conserve el control del flujo y sus checkpoints.
 
-- **Python 3.12+**
-- **[uv](https://github.com/astral-sh/uv)** (Gestor de dependencias ultrarrápido)
-- **Docker & Docker Compose** (Opcional, para ejecución de servicios complementarios como Redis)
+## Cómo levantar el entorno y ejecutar las pruebas
 
----
+Sigue estos pasos en **PowerShell**. Docker Compose levanta FastAPI, Redis Stack y Phoenix. La API también necesita credenciales válidas del proveedor LLM y de Pinecone, que son servicios externos.
 
-## 🚀 Instalación y Configuración (con `uv`)
+### 1. Instalar las herramientas
 
-### 1. Instalar `uv` (si no lo tienes en tu sistema)
+Instala Docker Desktop con Docker Compose y [`uv`](https://docs.astral.sh/uv/). Para correr los comandos del host, `uv` instalará/seleccionará Python 3.12+ y las dependencias declaradas en `pyproject.toml`.
 
-- **macOS / Linux:** `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- **Windows (PowerShell):** `irm https://astral.sh/uv/install.ps1 | iex`
+Si todavía no clonaste el repositorio:
 
-### 2. Clonar el repositorio y sincronizar el entorno
-
-```bash
-git clone https://github.com/diegofziegler/entrega_7.git  
-cd entrega_7  
-uv sync
+```powershell
+git clone https://github.com/diegofziegler/entrega_7.git
+Set-Location entrega_7
 ```
 
-### 3. Configurar las Variables de Entorno
+Si ya lo tienes, cambia a su carpeta. Confirma la ubicación antes de seguir:
 
-Crea un archivo `.env` basado en el archivo de ejemplo:
-
-```bash
-cp .env.example .env
+```powershell
+Get-Location
 ```
 
-*(Variables requeridas / opcionales: `GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY`, `PINECONE_API_KEY`, `PINECONE_INDEX_NAME`, `REDIS_URL`, `PHOENIX_COLLECTOR_ENDPOINT`, etc.)*
+### 2. Crear y completar `.env`
 
----
+Si todavía no tienes `.env`, créalo desde el ejemplo:
 
-## ▶️ Ejecución del Proyecto
-
-### Opción A: Ejecución local con `uv`
-
-Para iniciar el servidor de desarrollo de FastAPI utilizando el entorno virtual gestionado por `uv`:
-
-```bash
-uv run uvicorn src.entrega_7.main:app --reload
+```powershell
+Copy-Item .env.example .env
 ```
 
----
+Abre `.env` y completa las claves reales:
 
-## 📊 Observabilidad e Inicialización de Trazas (Arize Phoenix)
+- Elige `LLM_PROVIDER=gemini`, `groq` u `openai` y completa la clave correspondiente.
+- Completa `OPENAI_API_KEY`: RAG usa `text-embedding-3-small` para crear embeddings, aunque el LLM de chat sea Gemini o Groq.
+- Completa `PINECONE_API_KEY` y confirma que `PINECONE_INDEX_NAME` identifica un índice existente.
 
-El sistema cuenta con trazabilidad completa de cada ejecución utilizando **Arize Phoenix** y OpenInference.
+El índice Pinecone debe tener dimensión `1536` y métrica `cosine`. `PINECONE_NAMESPACE` selecciona el namespace. No subas `.env` ni claves reales al repositorio. Redis y Phoenix usan los valores de Compose; dentro de la red Docker, Compose configura los nombres de host internos para la API.
 
-### 1. Iniciar el Servidor de Observabilidad (Arize Phoenix)
+### Ejecución integral en un comando (recomendada)
 
-Para levantar el panel visualizador de trazas localmente con `uv`, ejecuta:
+Una vez que `.env` tiene las claves completadas manualmente, ejecuta desde la raíz:
 
-```bash
-uv run python -m phoenix.server.main serve
+```powershell
+.\run_acceptance.ps1
 ```
 
-Por defecto, la interfaz de Phoenix estará disponible en: **`http://localhost:6006`**
+El script valida que las claves requeridas estén presentes sin imprimir sus valores, sincroniza dependencias con `uv` y construye y levanta Docker Compose. Después consulta `http://localhost:8000/health` cada 5 segundos hasta que la respuesta indique `status=ok`, `rag_status=active` y `checkpointer=redis`; así da tiempo a que la API inicie y termine la preparación de RAG. El tiempo máximo de espera es de 10 minutos por defecto.
 
-### 2. Configuración en `.env`
+Si el arranque tarda más, puedes aumentar ese límite, por ejemplo a 15 minutos:
 
-Asegúrate de tener configuradas las siguientes variables en tu archivo `.env`:
-
-```env
-PHOENIX_COLLECTOR_ENDPOINT=http://localhost:6006
-PHOENIX_PROJECT_NAME=orquestador-multi-agente
+```powershell
+.\run_acceptance.ps1 -HealthTimeoutMinutes 15
 ```
 
-### 3. Visualización y Evidencias
+Si vence el plazo, el script muestra los últimos 100 registros del contenedor API, informa el último estado observado y termina con error. **Deja los contenedores activos** para facilitar el diagnóstico. Cuando el health check está listo, ejecuta `pytest` con persistencia real en Redis y luego la prueba de cinco preguntas. Al finalizar correctamente también deja Docker activo para inspeccionar Phoenix. Los resultados quedan en `trazas/spans.json` y `tests/test_5_preguntas.log`.
 
-- Toda llamada enviada a la API (`POST /api/v1/chat`) instrumenta automáticamente los *spans* de LangGraph, consultas RAG e invocaciones a los modelos LLM.
-- Al ingresar a `http://localhost:6006`, podrás inspeccionar en tiempo real el árbol de llamadas, latencias, token count y costos asociados a cada interacción.
-- Las evidencias e instrucciones adicionales se almacenan en el directorio [`./trazas`](./trazas).
+Las API keys siempre se ingresan manualmente en `.env`; el script no las genera, no las muestra ni las agrega al repositorio. Si alguna está vacía o falta, termina antes de levantar los servicios y señala el nombre de la variable que debes completar.
 
-### 4. Archivos de Log Locales
+En caso de error, muestra el paso fallido y conserva los contenedores para diagnóstico. Para detenerlos luego sin borrar checkpoints de Redis, usa `docker compose down` (sin `-v`). El resto de esta sección documenta el flujo manual equivalente.
 
-Además de la telemetría OTLP, el sistema registra actividades separadas en:
-- **`./log/agentes.log`**: Transiciones del supervisor, decisiones y respuesta del analista.
-- **`./log/rag.log`**: Carga de embeddings, ingesta de `.md` y búsquedas de similitud.
+### 3. Flujo manual: levantar los contenedores
 
----
-
-## 🌐 Endpoints de la API
-
-- `GET /health`: Verificación del estado del sistema, proveedor LLM activo y estado del RAG y Checkpointer.
-- `POST /api/v1/chat`: Inicia o continúa una interacción con el orquestador multi-agente.
-  - **Payload:**
-    ```json
-    {
-      "message": "¿De qué tratan las técnicas básicas del Karate Uechi-Ryu?",
-      "thread_id": "sesion-123",
-      "idioma_destino": "Inglés"
-    }
-    ```
-- `GET /api/v1/history/{thread_id}`: Recupera el historial de mensajes asociado a una sesión activa.
-- `POST /api/v1/rag/ingest`: Ejecuta o fuerza la ingesta de documentos Markdown ubicados en `./data`.
-
----
-
-## 🧪 Pruebas Unitarias e Integración
-
-Para ejecutar la suite completa de pruebas unitarias e integración:
-
-```bash
-PYTHONPATH=. uv run pytest tests/test_system.py
+```powershell
+docker compose up --build -d
 ```
+
+La primera ejecución puede tardar porque construye la imagen e instala dependencias. Revisa el arranque de la API:
+
+```powershell
+docker compose logs -f api
+```
+
+Espera a que la API termine la inicialización y la ingesta de `data/`. Cuando termine de revisar los logs, puedes salir de `logs -f` con `Ctrl+C`; esto no detiene los contenedores.
+
+### 4. Confirmar que el ambiente está listo
+
+En otra terminal de PowerShell, consulta el health check:
+
+```powershell
+Invoke-RestMethod -Uri "http://localhost:8000/health" -Method Get
+```
+
+Para ejecutar la prueba completa, espera a ver `status: ok`, `rag_status: active` y `checkpointer: redis`. Si el endpoint no responde, espera unos segundos y vuelve a consultarlo. Si muestra `degraded` o RAG `unavailable`, revisa las claves y la inicialización en `.env` y los logs antes de disparar la prueba.
+
+Direcciones locales:
+
+- API: `http://localhost:8000`
+- Documentación interactiva: `http://localhost:8000/docs`
+- Dashboard Phoenix: `http://localhost:6006`
+
+### 5. Disparar las cinco preguntas y consultar los historiales
+
+Con el health check correcto, ejecuta desde la raíz del repositorio:
+
+```powershell
+uv run python tests/test_5_preguntas.py
+```
+
+El script primero consulta `/health`; después envía las cinco preguntas, una por una, a `POST /api/v1/chat` y consulta `GET /api/v1/history/{thread_id}` para cada conversación. Solicita las respuestas en este orden: español, inglés, francés, portugués y español. Usa un `thread_id` distinto por pregunta y por ejecución. Imprime las respuestas y el historial en consola, y escribe los detalles y errores en `tests/test_5_preguntas.log`.
+
+Al final, consulta el proyecto `entrega-7` en Phoenix (`http://localhost:6006`) y exporta sus spans a `trazas/spans.json`. La exportación sigue el alcance del cliente Phoenix por proyecto, así que el JSON puede contener spans previos del mismo proyecto además de los de esta ejecución. Para entregar evidencia visual, captura el árbol de spans y el costo configurado en Phoenix según las instrucciones de [`trazas/README.md`](./trazas/README.md).
+
+Si la prueba termina con error, revisa primero el mensaje de consola y luego `tests/test_5_preguntas.log`; el script devuelve código de salida `1` cuando falla una solicitud, la consulta del historial o la exportación de Phoenix.
+
+### 6. (Opcional) Ejecutar las pruebas automatizadas
+
+Las pruebas unitarias usan dobles para LLM y Pinecone, así que no necesitan esas credenciales:
+
+```powershell
+uv sync --frozen
+uv run pytest -q
+```
+
+Para incluir la prueba de persistencia real en Redis, mantén los contenedores arriba y ejecuta:
+
+```powershell
+$env:TEST_REDIS_URL = "redis://localhost:6379"
+uv run pytest -q
+Remove-Item Env:TEST_REDIS_URL
+```
+
+La prueba de Redis se omite si `TEST_REDIS_URL` no está definido. Redis conserva sus datos en el volumen Docker `redis_data`. Para detener el ambiente sin borrar los checkpoints:
+
+```powershell
+docker compose down
+```
+
+No agregues `-v` si quieres conservar la memoria persistida en Redis.
+
+### Ejecución local de la API (opcional)
+
+Si prefieres ejecutar FastAPI en el host en lugar de en Docker, mantén Redis Stack y Phoenix activos en Docker y ejecuta:
+
+```powershell
+uv sync --frozen
+uv run entrega-7
+```
+
+La API local utiliza `REDIS_URL=redis://localhost:6379` y `PHOENIX_COLLECTOR_ENDPOINT=http://localhost:6006` del `.env`.
+
+## API
+
+- `GET /health`: informa estado de Pinecone/RAG y el checkpointer Redis.
+- `POST /api/v1/chat`: `{"message":"¿Quién fue Kanbun Uechi?","thread_id":"sesion-1","idioma_destino":"English"}`.
+- `GET /api/v1/history/{thread_id}`: carga el estado guardado en Redis.
+- `POST /api/v1/rag/ingest`: reingesta `DATA_DIR` de forma idempotente.
+
+Los modelos Pydantic rechazan campos inesperados, contenido vacío y valores fuera de límites. El supervisor usa salida estructurada; el investigador valida parámetros y resultados de búsqueda.
+
+## Observabilidad
+
+Phoenix recibe los spans OTLP de LangChain/OpenInference y un span raíz `api.chat` que incluye `thread_id` e idioma destino. La instrumentación registra llamadas y uso de tokens cuando el proveedor lo expone. En Phoenix configura el pricing del modelo para visualizar costo estimado por ejecución. Registros separados: `log/agentes.log` y `log/rag.log`.
+
+El procedimiento para capturar evidencia desde el dashboard está en [`trazas/README.md`](./trazas/README.md). Las capturas requieren ejecutar la aplicación con credenciales válidas y Phoenix activo.

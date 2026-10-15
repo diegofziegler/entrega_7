@@ -1,7 +1,7 @@
 import os
 import logging
 from logging.handlers import RotatingFileHandler
-from src.entrega_7.config import settings
+from entrega_7.config import settings
 
 def setup_loggers():
     os.makedirs(settings.LOG_DIR, exist_ok=True)
